@@ -33,7 +33,7 @@ def arg_parse():
     parser.add_argument("--nms_thresh", dest = "nms_thresh", help = "NMS Threshhold", default = 0.4)
     parser.add_argument("--cfg", dest = 'cfgfile', help = 
                         "Config file",
-                        default = "cfg/yolov3.cfg", type = str)
+                        default = "yolov3.cfg", type = str)
     parser.add_argument("--weights", dest = 'weightsfile', help = 
                         "weightsfile",
                         default = "yolov3.weights", type = str)
@@ -54,7 +54,7 @@ CUDA = torch.cuda.is_available()
 
 
 num_classes = 80
-classes = load_classes("data/coco.names")
+classes = load_classes("C:/Users/SM-PC/Desktop/scratch/data/coco.names")
 
 
 
@@ -79,17 +79,20 @@ model.eval()
 
 read_dir = time.time()
 #Detection phase
-try:
-    imlist = [osp.join(osp.realpath('.'), images, img) for img in os.listdir(images)]
-except NotADirectoryError:
-    imlist = []
-    imlist.append(osp.join(osp.realpath('.'), images))
-except FileNotFoundError:
-    print ("No file or directory with the name {}".format(images))
-    exit()
-    
+imlist = ["dog-cycle-car.png"]
 if not os.path.exists(args.det):
     os.makedirs(args.det)
+# try:
+#     imlist = [osp.join(osp.realpath('.'), images, img) for img in os.listdir(images)]
+# except NotADirectoryError:
+#     imlist = []
+#     imlist.append(osp.join(osp.realpath('.'), images))
+# except FileNotFoundError:
+#     print ("No file or directory with the name {}".format(images))
+#     exit()
+    
+# if not os.path.exists(args.det):
+#     os.makedirs(args.det)
 
 load_batch = time.time()
 loaded_ims = [cv2.imread(x) for x in imlist]
@@ -184,8 +187,10 @@ draw = time.time()
 
 
 def write(x, results):
-    c1 = tuple(x[1:3].int())
-    c2 = tuple(x[3:5].int())
+    c1 = tuple(map(int, x[1:3]))
+    c2 = tuple(map(int, x[3:5]))
+    #c1 = tuple(x[1:3].int())
+    #c2 = tuple(x[3:5].int())
     img = results[int(x[0])]
     cls = int(x[-1])
     color = random.choice(colors)
@@ -221,4 +226,3 @@ print("----------------------------------------------------------")
 
 
 torch.cuda.empty_cache()
-    
