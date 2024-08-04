@@ -100,7 +100,7 @@ def detect_drowsiness(image):
         return
     
     # 왼쪽 맨 앞의 얼굴을 운전자로 가정
-    faces = sorted(faces, key=lambda x: x[0])
+    faces = sorted(faces, key=lambda x: (x[0], -x[1]))
     driver_face = faces[0]
     
     for i, (x, y, w, h) in enumerate(faces):
@@ -108,6 +108,8 @@ def detect_drowsiness(image):
         points = np.matrix([[p.x, p.y] for p in predictor(image, rect).parts()])
 
         if i == 0: # 운전자
+            cv2.putText(show_frame, "Driver", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
             # 졸음 감지 로직 적용
             show_parts = points[EYES]
             right_eye_EAR = getEAR(points[RIGHT_EYE])
@@ -139,33 +141,34 @@ def detect_drowsiness(image):
                             
                 sign = 'Sleep count : ' + str(number_closed) + ' / ' + str(closed_limit)
 
+            # 하품 인식
+            mouth_points = points[MOUTH]
+            mouth_MAR = getMAR(mouth_points)
+            min_MAR = 0.6  # 하품으로 간주할 최소 MAR 값
+            
+            # 하품 인식 조건: 입이 벌어지고 눈이 감긴 상태
+            if mouth_MAR > min_MAR and mean_eye_EAR < min_EAR:
+                yawn_count += 1
+                if yawn_count >= yawn_limit:
+                    current_time = time.time()
+                    if current_time - last_alarm_time > alarm_interval:
+                        print("Yawning detected")
+                        winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
+                        last_alarm_time = current_time
+                    yawn_count = 0  # 하품 횟수 초기화
+
+            # 졸음 확정시 알람 설정
+            if number_closed > closed_limit:
+                current_time = time.time()
+                if current_time - last_alarm_time > alarm_interval:
+                    print("Alarm condition met")
+                    winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    last_alarm_time = current_time
+                number_closed = 0  # 눈 감김 횟수 초기화
+
         else: # 동승자
             cv2.putText(show_frame, "Passenger", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-        # 졸음 확정시 알람 설정
-        if number_closed > closed_limit:
-            current_time = time.time()
-            if current_time - last_alarm_time > alarm_interval:
-                print("Alarm condition met")
-                winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
-                last_alarm_time = current_time
-            number_closed = 0  # 눈 감김 횟수 초기화
-
-        # 하품 인식
-        mouth_points = points[MOUTH]
-        mouth_MAR = getMAR(mouth_points)
-        min_MAR = 0.6  # 하품으로 간주할 최소 MAR 값
-        
-        # 하품 인식 조건: 입이 벌어지고 눈이 감긴 상태
-        if mouth_MAR > min_MAR and mean_eye_EAR < min_EAR:
-            yawn_count += 1
-            if yawn_count >= yawn_limit:
-                current_time = time.time()
-                if current_time - last_alarm_time > alarm_interval:
-                    print("Yawning detected")
-                    winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
-                    last_alarm_time = current_time
-                yawn_count = 0  # 하품 횟수 초기화
 
     # 화면에 상태 및 하품 횟수 표시
     cv2.putText(show_frame, status, (10, 30), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
