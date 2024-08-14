@@ -10,13 +10,22 @@ import os
 from darknet import Darknet
 import pickle as pkl
 import random
-import dlib # 얼굴인식 및 랜드마크 검출
+import dlib # 얼굴 인식 및 랜드마크 검출
 import winsound # 경고음
-import mediapipe as mp
+import mediapipe as mp # 손 인식
 
+# MediaPipe 초기화
+mp_hands = mp.solutions.hands
+try:
+    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.3)
+    print("MediaPipe Hands 초기화 성공")
+except Exception as e:
+    print(f"MediaPipe Hands 초기화 실패: {e}")
+mp_draw = mp.solutions.drawing_utils
 
-# 운전자 얼굴 정보를 저장할 변수
+# 운전자 얼굴 정보/탑승자 손 정보를 저장할 변수
 driver_face = None
+passenger_hand = None
 
 # 졸음 인식 설정
 # 눈과 입의 랜드마크 인덱스 정의
@@ -198,7 +207,7 @@ nms_thesh = float(args.nms_thresh)
 CUDA = torch.cuda.is_available()
 
 num_classes = 80
-classes = load_classes("C:/Users/82103/Desktop/codeit/summerproject/test3(동승자 추가)/coco.names")  # YOLO 클래스 이름 파일 경로(상대 경로)
+classes = load_classes("C:/Users/82103/Desktop/codeit/summerproject/test2/coco.names")  # YOLO 클래스 이름 파일 경로(상대 경로)
 
 # 신경망 설정
 print("Loading.....")
@@ -242,10 +251,6 @@ def write(x, results):
     cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225, 255, 255], 1)
     return img
 
-# MediaPipe 초기화
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
-mp_draw = mp.solutions.drawing_utils
 
 # 손 감지를 위한 Haar Cascade 로드
 hand_cascade = cv2.CascadeClassifier('./haarcascade_hand.xml')
@@ -253,127 +258,173 @@ hand_cascade = cv2.CascadeClassifier('./haarcascade_hand.xml')
 # 손 위치 추적을 위한 변수
 last_hand_position = None
 last_hand_time = None
-hand_speed_threshold = 100 # 손 속도 임계값(픽셀/초)
+hand_speed_threshold = 500 # 손 속도 임계값(픽셀/초)
 attack_warning_count = 0
 attack_warning_limit = 2  # 공격으로 간주할 연속 감지 횟수
 current_hand_speed = 0
 
 # 손 감지 및 움직임 추적 함수
-def detect_hand_movement(frame, driver_face):
-    global last_hand_position, last_hand_time, attack_warning_count, last_alarm_time, current_hand_speed
+def detect_hand_movement(frame):
+    global passenger_hand, driver_face, last_alarm_time, last_hand_position, last_hand_time, current_hand_speed, attack_warning_count
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb_frame)
-    
-    current_time = time.time()
+
+    print("Processing frame for hand detection")
 
     if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        print(f"Detected {len(results.multi_hand_landmarks)} hands")
+        for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+            # 손의 바운딩 박스 계산
+            x_min = y_min = frame.shape[1]
+            x_max = y_max = 0
+            for lm in hand_landmarks.landmark:
+                x, y = int(lm.x * frame.shape[1]), int(lm.y * frame.shape[0])
+                x_min = min(x_min, x)
+                y_min = min(y_min, y)
+                x_max = max(x_max, x)
+                y_max = max(y_max, y)
+
             
-            # 손의 중심점 계산 (예: 손목 위치 사용)
-            hand_center = (int(hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].x * frame.shape[1]),
-                           int(hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].y * frame.shape[0]))
+            hand_center = ((x_min + x_max)//2, (y_min + y_max)//2)
+            print(f"Hand {idx+1} center: {hand_center}")
 
-            if last_hand_position is not None and last_hand_time is not None:
-                time_diff = current_time - last_hand_time
-                distance = np.sqrt((hand_center[0] - last_hand_position[0])**2 + 
-                                   (hand_center[1] - last_hand_position[1])**2)
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            print(f"Drawing hand {idx+1} landmarks")
+
+
+            # 탑승자의 손 식별 (화면 오른쪽에 있는 손으로 가정)
+            if hand_center[0] > frame.shape[1] // 2:  # 이 조건은 상황에 맞게 조정 필요
+                passenger_hand = (x_min, y_min, x_max - x_min, y_max - y_min)
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
                 
-                speed = distance / time_diff if time_diff > 0 else 0
-                current_hand_speed = speed  # 현재 속도 업데이트
+                # 손의 속도 계산
+                if last_hand_position is not None and last_hand_time is not None:
+                    time_diff = current_time - last_hand_time
+                    distance = np.sqrt((hand_center[0] - last_hand_position[0])**2 + 
+                                       (hand_center[1] - last_hand_position[1])**2)
+                    speed = distance / time_diff if time_diff > 0 else 0
+                    current_hand_speed = speed
 
-                if speed > hand_speed_threshold:
-                    # 손이 운전자 얼굴 근처로 이동하는지 확인
+                    # 운전자 얼굴과 탑승자 손의 충돌 감지 및 속도 고려
                     if driver_face is not None:
                         dx, dy, dw, dh = driver_face
-                        if (hand_center[0] > dx and hand_center[0] < dx+dw) and (hand_center[1] > dy and hand_center[1] < dy+dh):
+                        if (x_min < dx + dw and x_max > dx and
+                            y_min < dy + dh and y_max > dy and
+                            speed > hand_speed_threshold):
                             attack_warning_count += 1
                             if attack_warning_count >= attack_warning_limit:
                                 if current_time - last_alarm_time > alarm_interval:
-                                    print(f"Warning: Potential attack detected! Speed: {speed:.2f} pixels/second")
+                                    print(f"Warning: Potential threat to driver detected! Speed: {speed:.2f} pixels/second")
                                     winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
                                     last_alarm_time = current_time
                                 attack_warning_count = 0
                         else:
                             attack_warning_count = max(0, attack_warning_count - 1)
-                    else:
-                        attack_warning_count = 0
-                else:
-                    attack_warning_count = max(0, attack_warning_count - 1)
 
-            last_hand_position = hand_center
-            last_hand_time = current_time
-        
+                last_hand_position = hand_center
+                last_hand_time = current_time
+
+    else:
+        print("No hands detected in this frame")
+
     return frame
 
+# 객체 감지 결과 처리 함수
+def process_detected_objects(output, frame):
+    global driver_face, last_alarm_time
 
-# 메인 루프
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        print("웹캠에서 프레임을 읽을 수 없습니다.")
-        break
-
-    img, orig_im, dim = prep_image(frame, inp_dim)
-    im_dim = torch.FloatTensor(dim).repeat(1, 2)
-
-    if CUDA:
-        im_dim = im_dim.cuda()
-        img = img.cuda()
-
-    # YOLO 모델을 사용하여 객체 탐지
-    with torch.no_grad():
-        output = model(Variable(img), CUDA)
-    output = write_results(output, confidence, num_classes, nms_conf=nms_thesh)
-
-    if isinstance(output, int):
-        show_frame = orig_im.copy()
-        detect_drowsiness(orig_im)
-        show_frame = detect_hand_movement(show_frame, driver_face) # 손 움직임 감지 추가
-        cv2.imshow(title_name, show_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-        continue  # 객체가 탐지되지 않은 경우 다음 프레임으로
-    
-    im_dim = im_dim.repeat(output.size(0), 1)
-    scaling_factor = torch.min(inp_dim / im_dim, 1)[0].view(-1, 1)
-
-    output[:, [1, 3]] -= (inp_dim - scaling_factor * im_dim[:, 0].view(-1, 1)) / 2
-    output[:, [2, 4]] -= (inp_dim - scaling_factor * im_dim[:, 1].view(-1, 1)) / 2
-    output[:, 1:5] /= scaling_factor
-
-    for i in range(output.shape[0]):
-        output[i, [1, 3]] = torch.clamp(output[i, [1, 3]], 0.0, im_dim[i, 0])
-        output[i, [2, 4]] = torch.clamp(output[i, [2, 4]], 0.0, im_dim[i, 1])
-
-    # 스마트폰 탐지 시 알람 설정(운전자 근처에 있을 때만)
     for obj in output:
-        cls = int (obj[-1])
+        cls = int(obj[-1])
         if classes[cls] in ['remote', 'cell phone']:
             x1, y1, x2, y2 = obj[1:5]
             if driver_face is not None:
                 dx, dy, dw, dh = driver_face
-                # 스마트폰이 운전자 얼굴 근처에 있는지 확인
                 if (x1 > dx and x1 < dx+dw) or (x2 > dx and x2 < dx+dw):
                     current_time = time.time()
                     if current_time - last_alarm_time > alarm_interval:
-                        print("smart phone detected near driver! plz 집.중.")
+                        print("Smart phone detected near driver! Please focus.")
                         winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
                         last_alarm_time = current_time
 
-    list(map(lambda x: write(x, orig_im), output))
+    list(map(lambda x: write(x, frame), output))
 
-    show_frame = orig_im.copy()
-    detect_drowsiness(orig_im)
+# 메인 루프
+frame_count = 0
+while cap.isOpened():
+    try:
+        ret, frame = cap.read()
+        if not ret:
+            print("웹캠에서 프레임을 읽을 수 없습니다.")
+            break
 
-    show_frame = orig_im.copy()
-    detect_drowsiness(orig_im)
-    show_frame = detect_hand_movement(show_frame, driver_face)  # 손 움직임 감지 추가
+        frame_count += 1
+        print(f"\nProcessing frame {frame_count}")
+        print(f"Frame shape: {frame.shape}")
+        
+        show_frame = frame.copy()
+        detect_drowsiness(show_frame)
+        show_frame = detect_hand_movement(show_frame)
 
-    # 화면에 결과 표시
-    cv2.imshow(title_name, show_frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+        # 매 프레임마다 연산(YOLO, 얼굴감지, 손감지) 수행 -> 실시간 처리에 어려움 존재하므로, 성능 모니터링하고 필요할 경우 추가
+        # if time.time() - last_object_detection_time > object_detection_interval:
+        img, orig_im, dim = prep_image(frame, inp_dim)
+        im_dim = torch.FloatTensor(dim).repeat(1, 2)
+
+        if CUDA:
+            im_dim = im_dim.cuda()
+            img = img.cuda()
+
+        # YOLO 모델을 사용하여 객체 탐지
+        with torch.no_grad():
+            output = model(Variable(img), CUDA)
+        output = write_results(output, confidence, num_classes, nms_conf=nms_thesh)
+
+        if isinstance(output, int):
+            cv2.imshow(title_name, show_frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue  # 객체가 탐지되지 않은 경우 다음 프레임으로
+        
+        im_dim = im_dim.repeat(output.size(0), 1)
+        scaling_factor = torch.min(inp_dim / im_dim, 1)[0].view(-1, 1)
+
+        output[:, [1, 3]] -= (inp_dim - scaling_factor * im_dim[:, 0].view(-1, 1)) / 2
+        output[:, [2, 4]] -= (inp_dim - scaling_factor * im_dim[:, 1].view(-1, 1)) / 2
+        output[:, 1:5] /= scaling_factor
+
+        for i in range(output.shape[0]):
+            output[i, [1, 3]] = torch.clamp(output[i, [1, 3]], 0.0, im_dim[i, 0])
+            output[i, [2, 4]] = torch.clamp(output[i, [2, 4]], 0.0, im_dim[i, 1])
+
+        # 스마트폰 탐지 시 알람 설정(운전자 근처에 있을 때만)
+        for obj in output:
+            cls = int (obj[-1])
+            if classes[cls] in ['remote', 'cell phone']:
+                x1, y1, x2, y2 = obj[1:5]
+                if driver_face is not None:
+                    dx, dy, dw, dh = driver_face
+                    # 스마트폰이 운전자 얼굴 근처에 있는지 확인
+                    if (x1 > dx and x1 < dx+dw) or (x2 > dx and x2 < dx+dw):
+                        current_time = time.time()
+                        if current_time - last_alarm_time > alarm_interval:
+                            print("smart phone detected near driver! plz focus.")
+                            winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
+                            last_alarm_time = current_time
+
+        list(map(lambda x: write(x, orig_im), output))
+
+        show_frame = frame.copy()
+        detect_drowsiness(show_frame)
+        show_frame = detect_hand_movement(show_frame)
+
+        # 화면에 결과 표시
+        cv2.imshow(title_name, show_frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        
+    except Exception as e:
+        print(f"오류 발생: {e}")
         break
 
 cap.release()
