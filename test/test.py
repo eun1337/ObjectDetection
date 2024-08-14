@@ -12,6 +12,8 @@ import pickle as pkl
 import random
 import dlib # 얼굴인식 및 랜드마크 검출
 import winsound # 경고음
+import mediapipe as mp
+
 
 # 운전자 얼굴 정보를 저장할 변수
 driver_face = None
@@ -76,18 +78,8 @@ def getMAR(points):
 
 # 졸음 감지
 def detect_drowsiness(image):
-    global driver_face 
-    global number_closed
-    global yawn_count
-    global color
-    global show_frame
-    global sign
-    global status
-    global last_alarm_time
-    global calibration_counter
-    global total_EAR
-    global calibrated
-    global min_EAR
+    global driver_face, number_closed, yawn_count, color, show_frame, sign, status, last_alarm_time
+    global calibration_counter, total_EAR, calibrated, min_EAR, current_hand_speed
 
     # 이미지를 그레이스케일로 변환하고 히스토그램 평활화
     frame_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -100,7 +92,7 @@ def detect_drowsiness(image):
         return
     
     # 왼쪽 맨 앞의 얼굴을 운전자로 가정
-    faces = sorted(faces, key=lambda x: (x[0], -x[1]))
+    faces = sorted(faces, key=lambda x: (-x[0], -x[1]))
     driver_face = faces[0]
     
     for i, (x, y, w, h) in enumerate(faces):
@@ -170,11 +162,14 @@ def detect_drowsiness(image):
             cv2.putText(show_frame, "Passenger", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
 
-    # 화면에 상태 및 하품 횟수 표시
+    # 화면에 상태, 손 속도, 하품 횟수 표시
     cv2.putText(show_frame, status, (10, 30), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
+    if attack_warning_count > 0:
+        cv2.putText(show_frame, "DANGER", (10, 60), cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
+    cv2.putText(show_frame, f"Hand Speed: {current_hand_speed:.2f} px/s", (10, frame_height - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     if calibrated:
         cv2.putText(show_frame, sign, (10, frame_height - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        cv2.putText(show_frame, 'Yawn count : ' + str(yawn_count) + ' / ' + str(yawn_limit), (10, frame_height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        cv2.putText(show_frame, f"Yawn count: {yawn_count} / {yawn_limit}", (10, frame_height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
 # 인수 파싱 함수
 def arg_parse():
@@ -247,6 +242,72 @@ def write(x, results):
     cv2.putText(img, label, (c1[0], c1[1] + t_size[1] + 4), cv2.FONT_HERSHEY_PLAIN, 1, [225, 255, 255], 1)
     return img
 
+# MediaPipe 초기화
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
+mp_draw = mp.solutions.drawing_utils
+
+# 손 감지를 위한 Haar Cascade 로드
+hand_cascade = cv2.CascadeClassifier('./haarcascade_hand.xml')
+
+# 손 위치 추적을 위한 변수
+last_hand_position = None
+last_hand_time = None
+hand_speed_threshold = 100 # 손 속도 임계값(픽셀/초)
+attack_warning_count = 0
+attack_warning_limit = 2  # 공격으로 간주할 연속 감지 횟수
+current_hand_speed = 0
+
+# 손 감지 및 움직임 추적 함수
+def detect_hand_movement(frame, driver_face):
+    global last_hand_position, last_hand_time, attack_warning_count, last_alarm_time, current_hand_speed
+
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb_frame)
+    
+    current_time = time.time()
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            
+            # 손의 중심점 계산 (예: 손목 위치 사용)
+            hand_center = (int(hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].x * frame.shape[1]),
+                           int(hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].y * frame.shape[0]))
+
+            if last_hand_position is not None and last_hand_time is not None:
+                time_diff = current_time - last_hand_time
+                distance = np.sqrt((hand_center[0] - last_hand_position[0])**2 + 
+                                   (hand_center[1] - last_hand_position[1])**2)
+                
+                speed = distance / time_diff if time_diff > 0 else 0
+                current_hand_speed = speed  # 현재 속도 업데이트
+
+                if speed > hand_speed_threshold:
+                    # 손이 운전자 얼굴 근처로 이동하는지 확인
+                    if driver_face is not None:
+                        dx, dy, dw, dh = driver_face
+                        if (hand_center[0] > dx and hand_center[0] < dx+dw) and (hand_center[1] > dy and hand_center[1] < dy+dh):
+                            attack_warning_count += 1
+                            if attack_warning_count >= attack_warning_limit:
+                                if current_time - last_alarm_time > alarm_interval:
+                                    print(f"Warning: Potential attack detected! Speed: {speed:.2f} pixels/second")
+                                    winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
+                                    last_alarm_time = current_time
+                                attack_warning_count = 0
+                        else:
+                            attack_warning_count = max(0, attack_warning_count - 1)
+                    else:
+                        attack_warning_count = 0
+                else:
+                    attack_warning_count = max(0, attack_warning_count - 1)
+
+            last_hand_position = hand_center
+            last_hand_time = current_time
+        
+    return frame
+
+
 # 메인 루프
 while cap.isOpened():
     ret, frame = cap.read()
@@ -269,6 +330,7 @@ while cap.isOpened():
     if isinstance(output, int):
         show_frame = orig_im.copy()
         detect_drowsiness(orig_im)
+        show_frame = detect_hand_movement(show_frame, driver_face) # 손 움직임 감지 추가
         cv2.imshow(title_name, show_frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -304,6 +366,10 @@ while cap.isOpened():
 
     show_frame = orig_im.copy()
     detect_drowsiness(orig_im)
+
+    show_frame = orig_im.copy()
+    detect_drowsiness(orig_im)
+    show_frame = detect_hand_movement(show_frame, driver_face)  # 손 움직임 감지 추가
 
     # 화면에 결과 표시
     cv2.imshow(title_name, show_frame)
