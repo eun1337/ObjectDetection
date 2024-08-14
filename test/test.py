@@ -265,68 +265,80 @@ current_hand_speed = 0
 
 # 손 감지 및 움직임 추적 함수
 def detect_hand_movement(frame):
-    global passenger_hand, driver_face, last_alarm_time, last_hand_position, last_hand_time, current_hand_speed, attack_warning_count
+    global driver_face, last_alarm_time, current_hand_speed, attack_warning_count
+    global last_hand_position, last_hand_time
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb_frame)
 
-    print("Processing frame for hand detection")
+    current_time = time.time()
 
     if results.multi_hand_landmarks:
-        print(f"Detected {len(results.multi_hand_landmarks)} hands")
         for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-            # 손의 바운딩 박스 계산
-            x_min = y_min = frame.shape[1]
-            x_max = y_max = 0
-            for lm in hand_landmarks.landmark:
-                x, y = int(lm.x * frame.shape[1]), int(lm.y * frame.shape[0])
-                x_min = min(x_min, x)
-                y_min = min(y_min, y)
-                x_max = max(x_max, x)
-                y_max = max(y_max, y)
-
+            x_coords = [int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark]
+            y_coords = [int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark]
             
-            hand_center = ((x_min + x_max)//2, (y_min + y_max)//2)
-            print(f"Hand {idx+1} center: {hand_center}")
+            x_min, x_max = min(x_coords), max(x_coords)
+            y_min, y_max = min(y_coords), max(y_coords)
+            
+            hand_center = ((x_min + x_max) // 2, (y_min + y_max) // 2)
 
+            # 모든 손을 그리기
             mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-            print(f"Drawing hand {idx+1} landmarks")
-
-
-            # 탑승자의 손 식별 (화면 오른쪽에 있는 손으로 가정)
-            if hand_center[0] > frame.shape[1] // 2:  # 이 조건은 상황에 맞게 조정 필요
-                passenger_hand = (x_min, y_min, x_max - x_min, y_max - y_min)
-                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            
+            # 손에 번호 매기기
+            hand_label = f"PassengerHand{idx+1}"
+            cv2.putText(frame, hand_label, (x_min, y_min - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
                 
-                # 손의 속도 계산
-                if last_hand_position is not None and last_hand_time is not None:
-                    time_diff = current_time - last_hand_time
-                    distance = np.sqrt((hand_center[0] - last_hand_position[0])**2 + 
-                                       (hand_center[1] - last_hand_position[1])**2)
-                    speed = distance / time_diff if time_diff > 0 else 0
-                    current_hand_speed = speed
+            # 손의 속도와 방향 계산
+            if last_hand_position is not None and last_hand_time is not None:
+                time_diff = current_time - last_hand_time
+                distance = np.sqrt((hand_center[0] - last_hand_position[0])**2 + 
+                                   (hand_center[1] - last_hand_position[1])**2)
+                speed = distance / time_diff if time_diff > 0 else 0
+                current_hand_speed = speed
 
-                    # 운전자 얼굴과 탑승자 손의 충돌 감지 및 속도 고려
-                    if driver_face is not None:
-                        dx, dy, dw, dh = driver_face
-                        if (x_min < dx + dw and x_max > dx and
-                            y_min < dy + dh and y_max > dy and
-                            speed > hand_speed_threshold):
+                # 손의 이동 방향 계산
+                direction = (hand_center[0] - last_hand_position[0], 
+                             hand_center[1] - last_hand_position[1])
+
+                # 운전자 얼굴 위치 확인 및 위험 감지
+                if driver_face is not None:
+                    dx, dy, dw, dh = driver_face
+                    driver_center = (dx + dw // 2, dy + dh // 2)
+
+                    # 손이 운전자 방향으로 움직이는지 확인
+                    to_driver = (driver_center[0] - hand_center[0], 
+                                 driver_center[1] - hand_center[1])
+                    
+                    # 내적을 사용하여 방향 유사성 확인
+                    direction_norm = np.linalg.norm(direction)
+                    to_driver_norm = np.linalg.norm(to_driver)
+                    if direction_norm != 0 and to_driver_norm != 0:
+                        direction_similarity = (direction[0] * to_driver[0] + direction[1] * to_driver[1]) / (direction_norm * to_driver_norm)
+
+                        # 속도가 임계값을 초과하고, 운전자 방향으로 움직이는 경우
+                        if speed > hand_speed_threshold and direction_similarity > 0.7:  # 0.7은 약 45도 이내의 각도
                             attack_warning_count += 1
                             if attack_warning_count >= attack_warning_limit:
                                 if current_time - last_alarm_time > alarm_interval:
-                                    print(f"Warning: Potential threat to driver detected! Speed: {speed:.2f} pixels/second")
+                                    print(f"Warning: Potential threat from {hand_label}! Speed: {speed:.2f} pixels/second")
                                     winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
                                     last_alarm_time = current_time
                                 attack_warning_count = 0
                         else:
                             attack_warning_count = max(0, attack_warning_count - 1)
 
-                last_hand_position = hand_center
-                last_hand_time = current_time
+            last_hand_position = hand_center
+            last_hand_time = current_time
 
+        print(f"Detected {len(results.multi_hand_landmarks)} passenger hands")
     else:
-        print("No hands detected in this frame")
+        print("No hands detected")
+        # 손이 감지되지 않은 경우, 초기화
+        last_hand_position = None
+        last_hand_time = None
 
     return frame
 
