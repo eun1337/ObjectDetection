@@ -14,14 +14,24 @@ import dlib # 얼굴 인식 및 랜드마크 검출
 import winsound # 경고음
 import mediapipe as mp # 손 인식
 
-# MediaPipe 초기화
+
+# MediaPipe Hands 초기화
 mp_hands = mp.solutions.hands
 try:
     hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.3)
     print("MediaPipe Hands 초기화 성공")
 except Exception as e:
     print(f"MediaPipe Hands 초기화 실패: {e}")
+
+# MediaPipe pose 초기화
+mp_pose = mp.solutions.pose
+try:
+    pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    print("MediaPipe Pose 초기화 성공")
+except Exception as e:
+    print(f"MediaPipe Pose 초기화 실패: {e}")
 mp_draw = mp.solutions.drawing_utils
+
 
 # 운전자 얼굴 정보/탑승자 손 정보를 저장할 변수
 driver_face = None
@@ -87,8 +97,12 @@ def getMAR(points):
 
 # 졸음 감지
 def detect_drowsiness(image):
-    global driver_face, number_closed, yawn_count, color, show_frame, sign, status, last_alarm_time
-    global calibration_counter, total_EAR, calibrated, min_EAR, current_hand_speed
+    global driver_face, last_alarm_time, number_closed, yawn_count, color, show_frame, sign, status
+    global calibration_counter, total_EAR, calibrated, min_EAR
+    global current_hand_speed, attack_warning_count
+    global last_hand_position, last_hand_time
+    global current_foot_speed, foot_attack_warning_count
+    global last_foot_position, last_foot_time
 
     # 이미지를 그레이스케일로 변환하고 히스토그램 평활화
     frame_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -175,7 +189,6 @@ def detect_drowsiness(image):
     cv2.putText(show_frame, status, (10, 30), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
     if attack_warning_count > 0:
         cv2.putText(show_frame, "DANGER", (10, 60), cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
-    cv2.putText(show_frame, f"Hand Speed: {current_hand_speed:.2f} px/s", (10, frame_height - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     if calibrated:
         cv2.putText(show_frame, sign, (10, frame_height - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         cv2.putText(show_frame, f"Yawn count: {yawn_count} / {yawn_limit}", (10, frame_height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -263,82 +276,178 @@ attack_warning_count = 0
 attack_warning_limit = 2  # 공격으로 간주할 연속 감지 횟수
 current_hand_speed = 0
 
+# 발 위치 추적을 위한 변수
+foot_attack_warning_count = 0
+foot_attack_warning_limit = 2  # 공격으로 간주할 연속 감지 횟수
+current_foot_speed = 0
+last_foot_position = None
+last_foot_time = None
+foot_speed_threshold = 500  # 발 속도 임계값(픽셀/초)
+
 # 손 감지 및 움직임 추적 함수
 def detect_hand_movement(frame):
     global driver_face, last_alarm_time, current_hand_speed, attack_warning_count
     global last_hand_position, last_hand_time
 
+    try:
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb_frame)
+
+        current_time = time.time()
+
+        if results.multi_hand_landmarks:
+            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                x_coords = [lm.x for lm in hand_landmarks.landmark]
+                y_coords = [lm.y for lm in hand_landmarks.landmark]
+                
+                x_min, x_max = min(x_coords), max(x_coords)
+                y_min, y_max = min(y_coords), max(y_coords)
+                
+                hand_center = (
+                    int((x_min + x_max) / 2 * frame.shape[1]),
+                    int((y_min + y_max) / 2 * frame.shape[0])
+                )
+
+                # 모든 손을 그리기
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                
+                # 손에 번호 매기기 (한 번만)
+                hand_label = f"PassengerHand{idx+1}"
+                cv2.putText(frame, hand_label, 
+                            (int(x_min * frame.shape[1]), int(y_min * frame.shape[0]) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                    
+                # 손의 속도와 방향 계산
+                if last_hand_position is not None and last_hand_time is not None:
+                    time_diff = current_time - last_hand_time
+                    distance = np.sqrt((hand_center[0] - last_hand_position[0])**2 + 
+                                       (hand_center[1] - last_hand_position[1])**2)
+                    speed = distance / time_diff if time_diff > 0 else 0
+                    current_hand_speed = speed
+
+                    # 손의 이동 방향 계산
+                    direction = (hand_center[0] - last_hand_position[0], 
+                                 hand_center[1] - last_hand_position[1])
+
+                    # 운전자 얼굴 위치 확인 및 위험 감지
+                    if driver_face is not None:
+                        dx, dy, dw, dh = driver_face
+                        driver_center = (dx + dw // 2, dy + dh // 2)
+
+                        # 손이 운전자 방향으로 움직이는지 확인
+                        to_driver = (driver_center[0] - hand_center[0], 
+                                     driver_center[1] - hand_center[1])
+                        
+                        # 내적을 사용하여 방향 유사성 확인
+                        direction_norm = np.linalg.norm(direction)
+                        to_driver_norm = np.linalg.norm(to_driver)
+                        if direction_norm != 0 and to_driver_norm != 0:
+                            direction_similarity = (direction[0] * to_driver[0] + direction[1] * to_driver[1]) / (direction_norm * to_driver_norm)
+
+                            # 속도가 임계값을 초과하고, 운전자 방향으로 움직이는 경우
+                            if speed > hand_speed_threshold and direction_similarity > 0.7:
+                                attack_warning_count += 1
+                                print(f"Warning count: {attack_warning_count}")  # 디버깅용
+                                if attack_warning_count >= attack_warning_limit:
+                                    current_time = time.time()
+                                    if current_time - last_alarm_time > alarm_interval:
+                                        print(f"Warning: Potential threat from {hand_label}! Speed: {speed:.2f} pixels/second")
+                                        winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
+                                        last_alarm_time = current_time
+                                    attack_warning_count = 0
+                            else:
+                                attack_warning_count = max(0, attack_warning_count - 1)
+
+                last_hand_position = hand_center
+                last_hand_time = current_time
+
+            print(f"Detected {len(results.multi_hand_landmarks)} passenger hands")
+        else:
+            print("No hands detected")
+            # 손이 감지되지 않은 경우, 초기화
+            last_hand_position = None
+            last_hand_time = None
+
+    except Exception as e:
+        print(f"Error in detect_hand_movement: {e}")
+
+    return frame
+
+
+def detect_foot_movement(frame):
+    global driver_face, last_alarm_time, current_foot_speed, foot_attack_warning_count
+    global last_foot_position, last_foot_time
+
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(rgb_frame)
+    results = pose.process(rgb_frame)
 
     current_time = time.time()
 
-    if results.multi_hand_landmarks:
-        for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-            x_coords = [int(lm.x * frame.shape[1]) for lm in hand_landmarks.landmark]
-            y_coords = [int(lm.y * frame.shape[0]) for lm in hand_landmarks.landmark]
-            
-            x_min, x_max = min(x_coords), max(x_coords)
-            y_min, y_max = min(y_coords), max(y_coords)
-            
-            hand_center = ((x_min + x_max) // 2, (y_min + y_max) // 2)
+    if results.pose_landmarks:
+        # 오른쪽 발목 (landmark 28)과 왼쪽 발목 (landmark 27) 사용
+        right_ankle = results.pose_landmarks.landmark[28]
+        left_ankle = results.pose_landmarks.landmark[27]
 
-            # 모든 손을 그리기
-            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-            
-            # 손에 번호 매기기
-            hand_label = f"PassengerHand{idx+1}"
-            cv2.putText(frame, hand_label, (x_min, y_min - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+        # 두 발의 중심점 계산
+        foot_center = (
+            int((right_ankle.x + left_ankle.x) / 2 * frame.shape[1]),
+            int((right_ankle.y + left_ankle.y) / 2 * frame.shape[0])
+        )
+
+        # 발 위치 표시
+        cv2.circle(frame, foot_center, 5, (0, 255, 255), -1)
+        cv2.putText(frame, "Feet", (foot_center[0] - 10, foot_center[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+        # 발의 속도와 방향 계산
+        if last_foot_position is not None and last_foot_time is not None:
+            time_diff = current_time - last_foot_time
+            distance = np.sqrt((foot_center[0] - last_foot_position[0])**2 + 
+                               (foot_center[1] - last_foot_position[1])**2)
+            speed = distance / time_diff if time_diff > 0 else 0
+            current_foot_speed = speed
+
+            # 발의 이동 방향 계산
+            direction = (foot_center[0] - last_foot_position[0], 
+                         foot_center[1] - last_foot_position[1])
+
+            # 운전자 얼굴 위치 확인 및 위험 감지
+            if driver_face is not None:
+                dx, dy, dw, dh = driver_face
+                driver_center = (dx + dw // 2, dy + dh // 2)
+
+                # 발이 운전자 방향으로 움직이는지 확인
+                to_driver = (driver_center[0] - foot_center[0], 
+                             driver_center[1] - foot_center[1])
                 
-            # 손의 속도와 방향 계산
-            if last_hand_position is not None and last_hand_time is not None:
-                time_diff = current_time - last_hand_time
-                distance = np.sqrt((hand_center[0] - last_hand_position[0])**2 + 
-                                   (hand_center[1] - last_hand_position[1])**2)
-                speed = distance / time_diff if time_diff > 0 else 0
-                current_hand_speed = speed
+                # 내적을 사용하여 방향 유사성 확인
+                direction_norm = np.linalg.norm(direction)
+                to_driver_norm = np.linalg.norm(to_driver)
+                if direction_norm != 0 and to_driver_norm != 0:
+                    direction_similarity = (direction[0] * to_driver[0] + direction[1] * to_driver[1]) / (direction_norm * to_driver_norm)
 
-                # 손의 이동 방향 계산
-                direction = (hand_center[0] - last_hand_position[0], 
-                             hand_center[1] - last_hand_position[1])
+                    # 속도가 임계값을 초과하고, 운전자 방향으로 움직이는 경우
+                    if speed > foot_speed_threshold and direction_similarity > 0.7:  # 0.7은 약 45도 이내의 각도
+                        foot_attack_warning_count += 1
+                        if foot_attack_warning_count >= foot_attack_warning_limit:
+                            if current_time - last_alarm_time > alarm_interval:
+                                print(f"Warning: Potential threat from passenger's feet! Speed: {speed:.2f} pixels/second")
+                                winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
+                                last_alarm_time = current_time
+                            foot_attack_warning_count = 0
+                    else:
+                        foot_attack_warning_count = max(0, foot_attack_warning_count - 1)
 
-                # 운전자 얼굴 위치 확인 및 위험 감지
-                if driver_face is not None:
-                    dx, dy, dw, dh = driver_face
-                    driver_center = (dx + dw // 2, dy + dh // 2)
+        last_foot_position = foot_center
+        last_foot_time = current_time
 
-                    # 손이 운전자 방향으로 움직이는지 확인
-                    to_driver = (driver_center[0] - hand_center[0], 
-                                 driver_center[1] - hand_center[1])
-                    
-                    # 내적을 사용하여 방향 유사성 확인
-                    direction_norm = np.linalg.norm(direction)
-                    to_driver_norm = np.linalg.norm(to_driver)
-                    if direction_norm != 0 and to_driver_norm != 0:
-                        direction_similarity = (direction[0] * to_driver[0] + direction[1] * to_driver[1]) / (direction_norm * to_driver_norm)
-
-                        # 속도가 임계값을 초과하고, 운전자 방향으로 움직이는 경우
-                        if speed > hand_speed_threshold and direction_similarity > 0.7:  # 0.7은 약 45도 이내의 각도
-                            attack_warning_count += 1
-                            if attack_warning_count >= attack_warning_limit:
-                                if current_time - last_alarm_time > alarm_interval:
-                                    print(f"Warning: Potential threat from {hand_label}! Speed: {speed:.2f} pixels/second")
-                                    winsound.PlaySound("./alarm.wav", winsound.SND_FILENAME | winsound.SND_ASYNC)
-                                    last_alarm_time = current_time
-                                attack_warning_count = 0
-                        else:
-                            attack_warning_count = max(0, attack_warning_count - 1)
-
-            last_hand_position = hand_center
-            last_hand_time = current_time
-
-        print(f"Detected {len(results.multi_hand_landmarks)} passenger hands")
+        print(f"Detected passenger's feet")
     else:
-        print("No hands detected")
-        # 손이 감지되지 않은 경우, 초기화
-        last_hand_position = None
-        last_hand_time = None
+        print("No feet detected")
+        # 발이 감지되지 않은 경우, 초기화
+        last_foot_position = None
+        last_foot_time = None
+        current_foot_speed = 0
 
     return frame
 
@@ -377,6 +486,7 @@ while cap.isOpened():
         show_frame = frame.copy()
         detect_drowsiness(show_frame)
         show_frame = detect_hand_movement(show_frame)
+        show_frame = detect_foot_movement(show_frame)
 
         # 매 프레임마다 연산(YOLO, 얼굴감지, 손감지) 수행 -> 실시간 처리에 어려움 존재하므로, 성능 모니터링하고 필요할 경우 추가
         # if time.time() - last_object_detection_time > object_detection_interval:
@@ -426,17 +536,26 @@ while cap.isOpened():
 
         list(map(lambda x: write(x, orig_im), output))
 
-        show_frame = frame.copy()
-        detect_drowsiness(show_frame)
         show_frame = detect_hand_movement(show_frame)
+        show_frame = detect_foot_movement(show_frame)
 
         # 화면에 결과 표시
-        cv2.imshow(title_name, show_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-        
+        # 화면에 상태, 손 속도, 발 속도, 하품 횟수 표시
+        cv2.putText(show_frame, status, (10, 30), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
+        if attack_warning_count > 0 or foot_attack_warning_count > 0:
+            cv2.putText(show_frame, "DANGER", (10, 60), cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(show_frame, f"Hand Speed: {current_hand_speed:.2f} px/s", (10, frame_height - 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        cv2.putText(show_frame, f"Foot Speed: {current_foot_speed:.2f} px/s", (10, frame_height - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        if calibrated:
+            cv2.putText(show_frame, sign, (10, frame_height - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.putText(show_frame, f"Yawn count: {yawn_count} / {yawn_limit}", (10, frame_height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
     except Exception as e:
         print(f"오류 발생: {e}")
+        break
+
+    cv2.imshow(title_name, show_frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
