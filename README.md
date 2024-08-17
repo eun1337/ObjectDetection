@@ -24,12 +24,16 @@
 ```
 ├── data
 │   └── coco.names
-├── main
-│   └── coco.names
-├── util
-│   └── coco.names
-├── darknet
-│   └── coco.names
+├── download
+|   |   alarm.wav
+|   |   haarcascade_frontalface_alt.xml
+|   |   haarcascade_hand.xml
+|   |   pallete
+│   |   reveil_auto.wav
+│   └── yolov3.cfg
+├── darknet.py
+├── main.py
+└── util.py
 
 ```
 
@@ -39,9 +43,12 @@
     ```shell
     pip install torch mediapipe opencv dlib
     ```
+* directory
+  * download 폴더의 모든 파일들과 yolov3.weights, shape_predictor_68_face_landmarks.dat은 main.py 같은 디렉토리에 다운로드
 
 ## Help
 
 >![Google Mediapipe]
 >mediapipe를 통해 손을 더 정확히 인식할 수 있습니다.
->
+>download
+>yolov3.weights, shape_predictor_68_face_landmarks.dat 파일은 용량 문제로 깃에 첨부하지 못했습니다.
