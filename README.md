@@ -52,3 +52,8 @@
 >mediapipe를 통해 손을 더 정확히 인식할 수 있습니다.
 >download
 >yolov3.weights, shape_predictor_68_face_landmarks.dat 파일은 용량 문제로 깃에 첨부하지 못했습니다.
+
+
+## 교수님 피드백
+> 한 가지 기능에 좀 더 집중적으로 파고 들었다면 좋았을 듯
+> 졸업작품 시에 이용하면 좋을 듯
