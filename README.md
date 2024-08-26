@@ -47,11 +47,9 @@
   * download 폴더의 모든 파일들과 yolov3.weights, shape_predictor_68_face_landmarks.dat은 main.py 같은 디렉토리에 다운로드
 
 ## Help
-
->![Google Mediapipe]
 >mediapipe를 통해 손을 더 정확히 인식할 수 있습니다.
->download
->yolov3.weights, shape_predictor_68_face_landmarks.dat 파일은 용량 문제로 깃에 첨부하지 못했습니다.
+> - download
+> - yolov3.weights, shape_predictor_68_face_landmarks.dat 파일은 용량 문제로 깃에 첨부하지 못했습니다.
 
 
 ## 교수님 피드백
