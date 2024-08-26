@@ -48,8 +48,10 @@
 
 ## Help
 >mediapipe를 통해 손을 더 정확히 인식할 수 있습니다.
-> - download
+>
+>download
 > - yolov3.weights, shape_predictor_68_face_landmarks.dat 파일은 용량 문제로 깃에 첨부하지 못했습니다.
+> - github 'YOLO_v3_tutorial_from_scratch' 에 관련 파일이 모두 존재! 필요하다면 여기서 다운로드 가능
 
 
 ## 교수님 피드백
